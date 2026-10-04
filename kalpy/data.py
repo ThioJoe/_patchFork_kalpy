@@ -34,10 +34,17 @@ class Segment:
         duration = None
         if self.end is not None and self.begin is not None:
             duration = self.end - self.begin
+        # librosa truncates offset and duration to whole samples, so float error
+        # (e.g. 100.203 * 16000 = 1603247.9999999998) would lose a sample without this nudge
+        offset = self.begin
+        if offset:
+            offset += 1e-6
+        if duration is not None:
+            duration += 1e-6
         y, _ = librosa.load(
             self.file_path,
             sr=16000,
-            offset=self.begin,
+            offset=offset,
             duration=duration,
             mono=False,
         )
