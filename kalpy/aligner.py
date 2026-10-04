@@ -297,6 +297,12 @@ class KalpyAligner:
         feature_padding = 0.04
         if boundary_tolerance is None:
             boundary_tolerance = self.acoustic_model.frame_shift_seconds * 2
+        # Boundaries are computed relative to the utterance, audio is loaded relative to the file
+        segment_begin = utterance.segment.begin if utterance.segment.begin is not None else 0.0
+        if utterance.segment.end is not None:
+            segment_duration = utterance.segment.end - segment_begin
+        else:
+            segment_duration = len(alignment.alignment) * self.acoustic_model.frame_shift_seconds
         for i, s in enumerate(split):
             phone_id = aligner.transition_model.TransitionIdToPhone(s[0])
             duration = len(s) * self.acoustic_model.frame_shift_seconds
@@ -310,7 +316,7 @@ class KalpyAligner:
                 )
                 feature_segment_end = min(
                     round(boundary + feature_padding, 4),
-                    utterance.segment.end,
+                    segment_duration,
                 )
                 following_phone_duration = (
                     len(split[i + 1]) * self.acoustic_model.frame_shift_seconds
@@ -330,29 +336,37 @@ class KalpyAligner:
                     4,
                 )
                 seg = Segment(
-                    utterance.segment.file_path, feature_segment_begin, feature_segment_end
+                    utterance.segment.file_path,
+                    round(segment_begin + feature_segment_begin, 6),
+                    round(segment_begin + feature_segment_end, 6),
+                    utterance.segment.channel,
                 )
                 feats = self.acoustic_model.generate_features_for_fine_tune(
                     seg, cmvn=cmvn, fmllr_trans=fmllr_trans
                 )
                 begin_index = int(round(begin_offset * 1000))
-                end_index = int(round(end_offset * 1000))
-                sub_matrix = FloatSubMatrix(
-                    feats, begin_index, end_index - begin_index, 0, feats.NumCols()
-                )
-                feats = FloatMatrix(sub_matrix)
-                previous_transition_id = s[-1]
-                following_transition_id = split[i + 1][0]
-                new_boundary_index = gmm_interpolate_boundary_fast(
-                    aligner.acoustic_model,
-                    self.acoustic_model.transition_model,
-                    feats,
-                    previous_transition_id,
-                    following_transition_id,
-                )
-                boundary = round(
-                    feature_segment_begin + begin_offset + (new_boundary_index * 0.001), 3
-                )
+                end_index = min(int(round(end_offset * 1000)), feats.NumRows())
+                # Keep the original boundary if the search window is empty
+                if end_index - begin_index > 1:
+                    sub_matrix = FloatSubMatrix(
+                        feats, begin_index, end_index - begin_index, 0, feats.NumCols()
+                    )
+                    feats = FloatMatrix(sub_matrix)
+                    previous_transition_id = s[-1]
+                    following_transition_id = split[i + 1][0]
+                    new_boundary_index = gmm_interpolate_boundary_fast(
+                        aligner.acoustic_model,
+                        self.acoustic_model.transition_model,
+                        feats,
+                        previous_transition_id,
+                        following_transition_id,
+                    )
+                    # -1 means no crossing was found, so keep the original boundary
+                    if 0 <= new_boundary_index < end_index - begin_index:
+                        boundary = round(
+                            feature_segment_begin + begin_offset + (new_boundary_index * 0.001),
+                            3,
+                        )
             confidence = 0.0
             phone_intervals.append(
                 CtmInterval(

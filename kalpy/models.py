@@ -11,6 +11,7 @@ import os
 import typing
 from pathlib import Path
 
+import numpy as np
 import pywrapfst
 import yaml
 
@@ -38,6 +39,48 @@ if typing.TYPE_CHECKING:
     from _kalpy.hmm import TransitionModel
 
 logger = logging.getLogger("mfa")
+
+
+def _apply_with_frame_spacing(
+    feats: FloatMatrix,
+    function: typing.Callable[[FloatMatrix], FloatMatrix],
+    frame_spacing: int,
+) -> FloatMatrix:
+    """
+    Apply a function that uses neighboring frames (splicing or deltas) so that the neighbors are
+    ``frame_spacing`` rows apart.  Used for fine tuning features, which have a frame shift
+    ``frame_spacing`` times smaller than the features the model was trained on.
+
+    Parameters
+    ----------
+    feats: :class:`~_kalpy.matrix.FloatMatrix`
+        Input features
+    function: callable
+        Function to apply to each subsampled feature matrix
+    frame_spacing: int
+        Number of rows between frames used as context
+
+    Returns
+    -------
+    :class:`~_kalpy.matrix.FloatMatrix`
+        Output features with the same number of rows as the input
+    """
+    if frame_spacing <= 1 or feats.NumRows() == 0:
+        return function(feats)
+    input_array = feats.numpy()
+    output_array = None
+    for phase in range(min(frame_spacing, input_array.shape[0])):
+        phase_feats = FloatMatrix()
+        phase_feats.from_numpy(np.ascontiguousarray(input_array[phase::frame_spacing]))
+        phase_output = function(phase_feats).numpy()
+        if output_array is None:
+            output_array = np.zeros(
+                (input_array.shape[0], phase_output.shape[1]), dtype=np.float32
+            )
+        output_array[phase::frame_spacing] = phase_output
+    output = FloatMatrix()
+    output.from_numpy(output_array)
+    return output
 
 
 class AcousticModel:
@@ -131,13 +174,18 @@ class AcousticModel:
             pitch_computer = PitchComputer(**pitch_options)
             pitch = pitch_computer.compute_pitch_for_export(segment, compress=False)
             feats = paste_feats([feats, pitch], 1)
+        # Frames are 10 times denser than in training, so space context frames 10 rows apart
         if uses_splices:
-            feats = splice_frames(feats, splice_context, splice_context)
+            feats = _apply_with_frame_spacing(
+                feats, lambda x: splice_frames(x, splice_context, splice_context), 10
+            )
             if self.lda_mat is not None:
                 feats = apply_transform(feats, self.lda_mat)
         elif uses_deltas:
             delta_options = DeltaFeaturesOptions()
-            feats = compute_deltas(delta_options, feats)
+            feats = _apply_with_frame_spacing(
+                feats, lambda x: compute_deltas(delta_options, x), 10
+            )
         if uses_speaker_adaptation and fmllr_trans is not None:
             feats = apply_transform(feats, fmllr_trans)
         return feats
